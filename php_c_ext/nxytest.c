@@ -36,7 +36,7 @@ struct child{
 	char symb[UTF8_STR_LEN];
 	zend_ulong last;
 	struct trie *  next;
-	struct trie *  fail;
+	struct child *  fail;
 };
 
 struct trie{
@@ -81,21 +81,18 @@ static struct child * trie_search_child (struct trie * trie, char symb[UTF8_STR_
 
 #define set_utf8_with_offset(des,src,offset)              \
 	do {                                              \
-		if((src&0xFF&0xC0) != 0){	\
-			if((src&0xF0) == 0xF0){	\
-				if((src&0xFF) > 0xF7){	\
-					offset = 0;	\
-				}else{	\
-					offset = 4;	\
-				}	\
-			}else if((src&0xE0) == 0xE0){	\
-				offset = 3;	\
+		if((src&0xF0) == 0xF0){	\
+			if((src&0xFF) > 0xF7){	\
+				offset = 0;	\
 			}else{	\
-				offset = 2;	\
+				offset = 4;	\
 			}	\
+		}else if((src&0xE0) == 0xE0){	\
+			offset = 3;	\
+		}else if((src&0xC0) == 0xC0){	\
+			offset = 2;	\
 		}else{	\
 			offset = 1;	\
-			break;	\
 		}	\
 	} while (0)
 
@@ -111,7 +108,7 @@ void trie_add_word (struct trie * trie, const char * word, size_t length, zend_u
 		strncpy(symb,&word[0],offset);
 		symb[offset] = '\0';
 	}else{
-		return NULL;
+		return;
 	}
 	//printf("%d,%s\n",offset,symb);
 	//if(0 <= word[0] && word[0] <= 127){
@@ -203,20 +200,18 @@ static void _trie_print (struct trie *  t, int level){
 		return;
 
 	for (i = 0; i < t->children_count; i++){
+		printf("level:%d;",level);
 		tab (level);
 		if(t->parent!=NULL){
-			printf("parent:%s;",t->parent->symb);
+			printf("parent:%s:%p;",t->parent->symb,t->parent);
 		}
 		if(t->children[i].fail != NULL){
-			if(t->children[i].fail->parent==NULL){
-				printf("fail:root;");
-			}else{
-				printf("fail:%s;",t->children[i].fail->parent->symb);
-			}
+			printf("fail:%s:%p;",t->children[i].fail->symb,t->children[i].fail);
 		}else{
-				printf("fail:error;");
+			printf("fail:root;");
 		}
-		printf("%s %s\n", t->children[i].symb,t->children[i].last != TRIE_NOT_LAST ? "[last]" : "");
+		//printf("%s %s\n", t->children[i].symb,t->children[i].last != TRIE_NOT_LAST ? "[last]" : "");
+		printf("%p:%s:%d\n",&(t->children[i]),t->children[i].symb,t->children[i].last);
 		_trie_print (t->children[i].next, level+1);
 	}
 }
@@ -227,46 +222,124 @@ void trie_print (struct trie *  t){
 }
 
 /* Print the trie.  */
-static void _trie_build_fail(struct trie *  t,struct trie * root){
+//static void _trie_build_fail(struct trie *  t,struct trie * root){
+//	unsigned int i;
+//	struct trie * p;
+//	struct child* child;
+//	if (!t)
+//		return;
+//	for (i = 0; i < t->children_count; i++){
+//		if(t->parent == NULL){
+//			t->children[i].fail = root;
+//		}else{
+//			p = t->parent->fail;
+//			while(p != NULL){
+//				child = trie_search_child (p, t->children[i].symb);
+//				if(child){
+//					if(child->next != NULL){
+//						t->children[i].fail = child->next;
+//						break;
+//					}
+//				}
+//				if(p->parent == NULL){
+//					p = NULL;
+//				}else{
+//					p = p->parent->fail;
+//				}
+//			}
+//			if (p == NULL){
+//				t->children[i].fail = root;
+//			}
+//		}
+//	}
+//	for (i = 0; i < t->children_count; i++){
+//		_trie_build_fail(t->children[i].next,root);
+//	}
+//}
+
+/* Build Fail Point.  */
+//void trie_build_fail(struct trie *  t){
+//	_trie_build_fail(t,t);
+//}
+
+#define FAIL_QUEUE_SIZE 4
+struct fail_node_queue{
+	unsigned int size;
+	unsigned int count;
+	struct trie**  queue;
+};
+
+void trie_build_fail(struct trie *  root){
+	struct fail_node_queue* queue= (struct fail_node_queue*)malloc(sizeof(struct fail_node_queue));
+	queue->count = 0;
+	queue->size  = FAIL_QUEUE_SIZE;
+	queue->queue = (struct trie**)malloc(FAIL_QUEUE_SIZE*sizeof(struct trie*));
+	memset(queue->queue,0,FAIL_QUEUE_SIZE*sizeof(struct trie*));
+	queue->queue[queue->count] = root;
+	queue->count++;
+
+	unsigned int i = 0;
+	unsigned int j;
+	while(i < queue->count){
+		_trie_build_fail(queue->queue[i],root);
+		if(queue->queue[i]){
+			for (j = 0; j < queue->queue[i]->children_count; j++){
+				if(queue->count >= queue->size){
+					queue->size *= 2;
+					queue->queue = realloc(queue->queue,queue->size*sizeof(struct trie*));
+				}
+				queue->queue[queue->count] = queue->queue[i]->children[j].next;
+				queue->count++;
+			}
+		}
+		i++;
+	}
+
+	free(queue->queue);
+	free(queue);
+}
+
+void _trie_build_fail(struct trie *  t,struct trie * root){
 	unsigned int i;
-	struct trie * p;
+	struct child* p;
 	struct child* child;
 	if (!t)
 		return;
 	for (i = 0; i < t->children_count; i++){
 		if(t->parent == NULL){
-			t->children[i].fail = root;
+			t->children[i].fail = NULL;
 		}else{
 			p = t->parent->fail;
-			while(p != NULL){
-				child = trie_search_child (p, t->children[i].symb);
+			if(p == NULL){
+				child = trie_search_child(root, t->children[i].symb);
 				if(child){
-					if(child->next != NULL){
-						t->children[i].fail = child->next;
-						break;
+					t->children[i].fail = child;
+				}else{
+					t->children[i].fail = NULL;
+				}
+			}else{
+				while(p != NULL){
+					if(p->next != NULL){
+						child = trie_search_child(p->next, t->children[i].symb);
+						if(child){
+							t->children[i].fail = child;
+							break;
+						}
+					}
+					p = p->fail;
+				}
+				if (p == NULL){
+					child = trie_search_child(root, t->children[i].symb);
+					if(child){
+						t->children[i].fail = child;
+					}else{
+						t->children[i].fail = NULL;
 					}
 				}
-				if(p->parent == NULL){
-					p = NULL;
-				}else{
-					p = p->parent->fail;
-				}
-			}
-			if (p == NULL){
-				t->children[i].fail = root;
 			}
 		}
 	}
-	for (i = 0; i < t->children_count; i++){
-		_trie_build_fail(t->children[i].next,root);
-	}
 }
-
-/* Build Fail Point.  */
-void trie_build_fail(struct trie *  t){
-	_trie_build_fail(t,t);
-}
-
 
 /* Deallocate memory used for trie.  */
 void trie_free (struct trie *  trie){
@@ -274,8 +347,13 @@ void trie_free (struct trie *  trie){
 	if (!trie)
 		return;
 
-	for (i = 0; i < trie->children_count; i++)
-		trie_free (trie->children[i].next);
+	if(trie->children_count > 0){
+		for (i = 0; i < trie->children_count; i++){
+			if(trie->children[i].next){
+				trie_free (trie->children[i].next);
+			}
+		}
+	}
 
 	if (trie->children)
 		free (trie->children);
@@ -335,7 +413,7 @@ struct search_res* str_search(struct trie *  trie, const char *  word, size_t le
 	memset(res->res,0,SEARCH_RES_SIZE*sizeof(zend_ulong));
 	
 	struct child*  child = NULL;
-	struct trie* p = trie;
+	struct child* p = NULL;
 	struct child* t;
 	unsigned int i = 0;
 	char symb[UTF8_STR_LEN];
@@ -348,6 +426,7 @@ struct search_res* str_search(struct trie *  trie, const char *  word, size_t le
 		}else{
 			return NULL;
 		}
+		//printf("%s,%x,%x,%d\n",symb,word[i],word[i]&0xFF,offset);
 		//printf("%d,%s\n",offset,symb);
 		//if(0 <= word[i]&& word[i]<= 127){
 		//	offset = 1;
@@ -359,19 +438,17 @@ struct search_res* str_search(struct trie *  trie, const char *  word, size_t le
 		//	symb[offset] = '\0';
 		//}
 		i += offset;
-		while(p->parent!=NULL){
-			child = trie_search_child(p, symb);
-			if(child)break;
-			if(p->parent!=NULL)p = p->parent->fail;
-		}
-		if(p->parent==NULL)child = trie_search_child(p, symb);
-		if(child){
-			if(child->next == NULL){
-				p = child->fail;
-			}else{
-				p = child->next;
+		while(p != NULL){
+			if(p->next != NULL){
+				child = trie_search_child(p->next, symb);
+				if(child)break;
 			}
-			t = child;
+			p = p->fail;
+		}
+		if(p == NULL)child = trie_search_child(trie, symb);
+		if(child){
+			p = child;
+			t = p;
 			while(t != NULL){
 				if(t->last != -1){
 					if(res->count >= res->size){
@@ -381,7 +458,12 @@ struct search_res* str_search(struct trie *  trie, const char *  word, size_t le
 					res->res[res->count] = t->last;
 					res->count++;
 				}
-				t = t->fail->parent;
+				//if(t->fail != NULL){
+				//	printf("%p,%s,%d;%p,%s,%d\n",t->fail,t->fail->symb,t->fail->last,t,t->symb,t->last);
+				//}else{
+				//	printf("%p,%s,%d\n",t,t->symb,t->last);
+				//}
+				t = t->fail;
 			}
 		}
 	}
@@ -544,8 +626,11 @@ PHP_METHOD(testobj,__destruct){
 	zval *actree;
 	actree = zend_read_property(testobj_ce,getThis(),"actree",sizeof("actree")-1,0,&actree);
 	dict = Z_OBJ_P(actree);
+	if(dict == IS_NULL){
+		return;
+	}
 	trie_free (dict);
-	efree(actree);
+	//efree(actree);
 }
 
 //typedef _node{
